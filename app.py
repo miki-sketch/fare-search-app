@@ -3,6 +3,7 @@ import pandas as pd
 import yaml
 import os
 import json
+import re
 import difflib
 import gspread
 from google.oauth2.service_account import Credentials
@@ -139,10 +140,23 @@ def get_gspread_client() -> gspread.Client:
 # データ取得・解析ロジック
 # ============================================================
 def _parse_number(text: str) -> Optional[float]:
-    """カンマや単位を除去して数値変換。失敗時は None。"""
-    cleaned = text.strip().replace(",", "").replace("，", "").replace("kg", "").strip()
+    """
+    "20 kg", "30KG", "1,500", "1500.5" など単位・記号混じりの文字列から
+    数値部分だけを正規表現で抽出して float に変換する。
+    空文字・ヘッダー文字列・変換不能な値はすべて None を返す（例外を起こさない）。
+    """
+    if not text or not text.strip():
+        return None
+    # 全角数字・カンマを半角に正規化
+    normalized = text.strip()
+    normalized = normalized.translate(str.maketrans("０１２３４５６７８９，．", "0123456789,."))
+    # 数字・ドット・カンマ・先頭マイナスのみを抽出（最初にマッチした塊を使用）
+    match = re.search(r"-?[\d,]+\.?\d*", normalized)
+    if not match:
+        return None
+    num_str = match.group().replace(",", "")
     try:
-        return float(cleaned)
+        return float(num_str)
     except ValueError:
         return None
 
