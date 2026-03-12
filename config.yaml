@@ -4,7 +4,7 @@
 
 spreadsheets:
   - name: "2022年度版"
-    id: "1z1kFQ1akMWJ3pYpiUA1pyAgXycJwky5r"
+    id: "1-V8rDl_HlAOE03FESWsKwYCBuZC2VmLC66mS01_Yw4c"
     sheet_index: 0        # シートのインデックス (0始まり)。sheet_nameが優先されます。
     sheet_name: ""        # シート名で指定する場合はここに入力 (空欄=インデックスを使用)
 
