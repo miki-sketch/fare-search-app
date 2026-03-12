@@ -236,12 +236,29 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
 
 
 # ============================================================
-# 検索ロジック（完全一致のみ・曖昧検索なし）
+# 検索ロジック
 # ============================================================
 def find_weight_ceiling(input_weight: float, weights: list[float]) -> Optional[float]:
     """入力重量以上の最小値（切り上げ）を返す。"""
     candidates = [w for w in weights if w >= input_weight]
     return min(candidates) if candidates else None
+
+
+def match_city(normalized_input: str, city_list: list[str]) -> Optional[str]:
+    """
+    都市名を以下の優先順位で照合して返す。difflib は使用しない。
+      1. 完全一致
+      2. 前方一致（入力が都市名の先頭と一致するもの、最初の1件）
+    どちらも該当しなければ None を返す。
+    """
+    # 1. 完全一致
+    if normalized_input in city_list:
+        return normalized_input
+    # 2. 前方一致（入力文字列で始まる都市名を探す）
+    for city in city_list:
+        if city.startswith(normalized_input):
+            return city
+    return None
 
 
 # ============================================================
@@ -322,13 +339,17 @@ if search_clicked:
     if not city_input or weight_input <= 0:
         st.warning("行先と重量（0より大きい値）を入力してください。")
     else:
-        # 入力都市名を正規化してから完全一致検索
         normalized_input = _normalize_city(city_input)
+        matched_city = match_city(normalized_input, city_list)
 
-        if normalized_input not in fare_table:
+        if matched_city is None:
             st.error(f"「{city_input}」はタリフに存在しません。都市名を正確に入力してください。")
 
         else:
+            # 前方一致で補完された場合は通知
+            if matched_city != normalized_input:
+                st.caption(f"「{city_input}」を「{matched_city}」として検索しました。")
+
             matched_weight = find_weight_ceiling(weight_input, weights)
 
             if matched_weight is None:
@@ -338,11 +359,11 @@ if search_clicked:
                 )
 
             else:
-                fare = fare_table[normalized_input].get(matched_weight)
+                fare = fare_table[matched_city].get(matched_weight)
 
                 if fare is None:
                     st.error(
-                        f"「{city_input}」× **{matched_weight:g} kg** の運賃データが見つかりません。\n\n"
+                        f"「{matched_city}」× **{matched_weight:g} kg** の運賃データが見つかりません。\n\n"
                         "OKTable のデータを確認してください。"
                     )
                 else:
@@ -354,7 +375,7 @@ if search_clicked:
                         st.markdown(
                             f'<div class="ref-box">'
                             f'<b>参照した都市名</b>'
-                            f'<span class="ref-value">{normalized_input}</span>'
+                            f'<span class="ref-value">{matched_city}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
