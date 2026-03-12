@@ -190,6 +190,7 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
 
     # --- ヘッダー行をスキップ (B列が数値に変換できない行を飛ばす) ---
     fare_table: dict[str, dict[float, float]] = {}
+    distance_map: dict[str, str] = {}   # 都市名 → 距離文字列（D列）
     seen_cities: list[str] = []
     seen_set: set[str] = set()
 
@@ -198,9 +199,11 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
         if len(row) < 3:
             continue
 
-        city_raw  = row[0].strip()
+        city_raw   = row[0].strip()
         weight_raw = row[1].strip()
         fare_raw   = row[2].strip()
+        # D列（index 3）が存在すれば距離として取得（なければ空文字）
+        distance_raw = row[3].strip() if len(row) >= 4 else ""
 
         # 都市名が空 → スキップ
         if not city_raw:
@@ -222,6 +225,10 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
 
         fare_table[city][weight] = fare
 
+        # 距離は都市ごとに1回だけ記録（同じ都市で複数行あっても上書きしない）
+        if city not in distance_map and distance_raw:
+            distance_map[city] = distance_raw
+
     if not fare_table:
         st.error(
             f"シート「{sheet_name}」から有効なデータを読み込めませんでした。\n\n"
@@ -232,7 +239,7 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
     # 全都市共通の重量リストを昇順で作成
     all_weights = sorted({w for city_data in fare_table.values() for w in city_data})
 
-    return seen_cities, all_weights, fare_table
+    return seen_cities, all_weights, fare_table, distance_map
 
 
 # ============================================================
@@ -294,7 +301,7 @@ with st.sidebar:
 # ============================================================
 # データ取得
 # ============================================================
-city_list, weights, fare_table = load_fare_data(
+city_list, weights, fare_table, distance_map = load_fare_data(
     spreadsheet_id=spreadsheet_id,
     sheet_name=sheet_name_cfg,
 )
@@ -370,7 +377,7 @@ if search_clicked:
                     st.markdown("---")
                     st.subheader("📊 検索結果")
 
-                    ref_col1, ref_col2 = st.columns(2)
+                    ref_col1, ref_col2, ref_col3 = st.columns(3)
                     with ref_col1:
                         st.markdown(
                             f'<div class="ref-box">'
@@ -386,6 +393,15 @@ if search_clicked:
                             f'<div class="ref-box">'
                             f'<b>参照した重量 {weight_note}</b>'
                             f'<span class="ref-value">{matched_weight:g} kg</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    with ref_col3:
+                        distance_val = distance_map.get(matched_city, "—")
+                        st.markdown(
+                            f'<div class="ref-box">'
+                            f'<b>参照した距離</b>'
+                            f'<span class="ref-value">{distance_val}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
