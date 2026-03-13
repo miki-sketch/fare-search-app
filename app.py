@@ -268,14 +268,14 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
 def get_road_distance_km(destination: str) -> tuple[Optional[float], str]:
     """
     Google Maps Distance Matrix API で ORIGIN_ADDRESS → destination の
-    道路距離(km)を取得する。環境変数 Maps_API_KEY を使用。
+    道路距離(km)を取得する。環境変数 GOOGLE_MAPS_API_KEY を使用。
 
     Returns:
         (距離km, エラーメッセージ)  ※成功時はエラーメッセージが空文字
     """
-    api_key = os.environ.get("Maps_API_KEY", "")
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
     if not api_key:
-        return None, "環境変数 Maps_API_KEY が設定されていません。"
+        return None, "環境変数 GOOGLE_MAPS_API_KEY が設定されていません。"
 
     url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     params = {
