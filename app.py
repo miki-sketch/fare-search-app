@@ -3,6 +3,7 @@ import yaml
 import os
 import json
 import re
+import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from typing import Optional
@@ -16,6 +17,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ============================================================
+# 起点住所（変更時はここを修正）
+# ============================================================
+ORIGIN_ADDRESS = "〒409-3611 山梨県西八代郡市川三郷町大塚1125"
 
 # ============================================================
 # カスタム CSS (スマホ・PC 両対応)
@@ -58,6 +64,18 @@ st.markdown("""
         font-size: 0.9rem;
         font-weight: 600;
         margin-bottom: 8px;
+    }
+
+    .maps-badge {
+        display: inline-block;
+        background-color: #198754;
+        color: white;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-left: 6px;
+        vertical-align: middle;
     }
 
     @media (max-width: 768px) {
@@ -145,22 +163,38 @@ def _parse_number(text: str) -> Optional[float]:
         return None
 
 
+def _is_distance_tier(raw: str) -> bool:
+    """
+    A列の値が距離設定（純粋な整数）かどうか判定する。
+    "100", "200", "１００" → True
+    "上海", "バンコク", "500cc" → False
+    """
+    normalized = raw.strip().translate(
+        str.maketrans("０１２３４５６７８９，", "0123456789,")
+    )
+    return bool(re.fullmatch(r"[\d,]+", normalized))
+
+
 # ============================================================
-# データ取得 (OKTable: A=都市名, B=重量, C=運賃 のフラットリスト)
+# データ取得 (OKTable: A=都市名/距離設定, B=重量, C=運賃, D=距離参考)
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner="スプレッドシートからデータを取得しています...")
 def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
     """
     OKTable シートを読み込み、運賃テーブルを構築する。
 
+    A列が都市名 → fare_table に格納（都市名マッチ用）
+    A列が純粋な数値 → distance_fare_table に格納（距離マッチ用）
+
     Returns:
-        unique_cities : ユニークな都市名リスト（正規化済み、出現順）
-        weights       : 重量リスト（昇順・重複なし）
-        fare_table    : dict[正規化都市名][重量(float)] = 運賃(float)
+        unique_cities       : ユニークな都市名リスト（正規化済み、出現順）
+        weights             : 重量リスト（昇順・重複なし）
+        fare_table          : dict[正規化都市名][重量(float)] = 運賃(float)
+        distance_map        : dict[正規化都市名] = 距離文字列（D列）
+        distance_fare_table : dict[距離km(float)][重量(float)] = 運賃(float)
     """
     gc = get_gspread_client()
 
-    # --- シート取得 ---
     try:
         ss = gc.open_by_key(spreadsheet_id)
     except gspread.exceptions.SpreadsheetNotFound:
@@ -181,65 +215,120 @@ def load_fare_data(spreadsheet_id: str, sheet_name: str) -> tuple:
         )
         st.stop()
 
-    # --- 全行取得 ---
     all_rows = ws.get_all_values()
 
     if not all_rows:
         st.error(f"シート「{sheet_name}」にデータがありません。")
         st.stop()
 
-    # --- ヘッダー行をスキップ (B列が数値に変換できない行を飛ばす) ---
     fare_table: dict[str, dict[float, float]] = {}
-    distance_map: dict[str, str] = {}   # 都市名 → 距離文字列（D列）
+    distance_fare_table: dict[float, dict[float, float]] = {}
+    distance_map: dict[str, str] = {}
     seen_cities: list[str] = []
     seen_set: set[str] = set()
 
     for row in all_rows:
-        # 列数が 3 未満の行はスキップ
         if len(row) < 3:
             continue
 
-        city_raw   = row[0].strip()
-        weight_raw = row[1].strip()
-        fare_raw   = row[2].strip()
-        # D列（index 3）が存在すれば距離として取得（なければ空文字）
+        city_raw     = row[0].strip()
+        weight_raw   = row[1].strip()
+        fare_raw     = row[2].strip()
         distance_raw = row[3].strip() if len(row) >= 4 else ""
 
-        # 都市名が空 → スキップ
         if not city_raw:
             continue
 
-        # 重量・運賃が数値でない → ヘッダー行などとみなしてスキップ
         weight = _parse_number(weight_raw)
         fare   = _parse_number(fare_raw)
         if weight is None or fare is None:
             continue
 
-        # 都市名を正規化（スペース除去）してキーとして使用
-        city = _normalize_city(city_raw)
+        # A列が純粋な数値 → 距離タリフエントリとして分類
+        if _is_distance_tier(city_raw):
+            dist_km = _parse_number(city_raw)
+            if dist_km is not None:
+                if dist_km not in distance_fare_table:
+                    distance_fare_table[dist_km] = {}
+                distance_fare_table[dist_km][weight] = fare
+            continue
 
+        # 都市名エントリ
+        city = _normalize_city(city_raw)
         if city not in seen_set:
             seen_cities.append(city)
             seen_set.add(city)
             fare_table[city] = {}
-
         fare_table[city][weight] = fare
 
-        # 距離は都市ごとに1回だけ記録（同じ都市で複数行あっても上書きしない）
         if city not in distance_map and distance_raw:
             distance_map[city] = distance_raw
 
-    if not fare_table:
+    if not fare_table and not distance_fare_table:
         st.error(
             f"シート「{sheet_name}」から有効なデータを読み込めませんでした。\n\n"
-            "A列=都市名、B列=重量(数値)、C列=運賃(数値) の形式を確認してください。"
+            "A列=都市名/距離設定, B列=重量(数値), C列=運賃(数値) の形式を確認してください。"
         )
         st.stop()
 
-    # 全都市共通の重量リストを昇順で作成
-    all_weights = sorted({w for city_data in fare_table.values() for w in city_data})
+    all_weights = sorted(
+        {w for city_data in fare_table.values() for w in city_data}
+        | {w for dist_data in distance_fare_table.values() for w in dist_data}
+    )
 
-    return seen_cities, all_weights, fare_table, distance_map
+    return seen_cities, all_weights, fare_table, distance_map, distance_fare_table
+
+
+# ============================================================
+# Google Maps Distance Matrix API
+# ============================================================
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_road_distance_km(destination: str) -> tuple[Optional[float], str]:
+    """
+    Google Maps Distance Matrix API で ORIGIN_ADDRESS → destination の
+    道路距離(km)を取得する。環境変数 Maps_API_KEY を使用。
+
+    Returns:
+        (距離km, エラーメッセージ)  ※成功時はエラーメッセージが空文字
+    """
+    api_key = os.environ.get("Maps_API_KEY", "")
+    if not api_key:
+        return None, "環境変数 Maps_API_KEY が設定されていません。"
+
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": ORIGIN_ADDRESS,
+        "destinations": destination,
+        "key": api_key,
+        "language": "ja",
+        "units": "metric",
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") != "OK":
+            return None, f"API ステータスエラー: {data.get('status', '不明')}"
+
+        element = data["rows"][0]["elements"][0]
+        elem_status = element.get("status", "不明")
+
+        if elem_status != "OK":
+            if elem_status == "NOT_FOUND":
+                return None, f"「{destination}」の住所が Google Maps で見つかりませんでした。"
+            if elem_status == "ZERO_RESULTS":
+                return None, f"「{destination}」までの経路が見つかりませんでした。"
+            return None, f"距離取得エラー: {elem_status}"
+
+        distance_m = element["distance"]["value"]  # メートル単位
+        return distance_m / 1000.0, ""
+
+    except requests.exceptions.Timeout:
+        return None, "Google Maps API がタイムアウトしました（10秒）。"
+    except Exception as e:
+        return None, f"Google Maps API エラー: {e}"
 
 
 # ============================================================
@@ -258,14 +347,18 @@ def match_city(normalized_input: str, city_list: list[str]) -> Optional[str]:
       2. 前方一致（入力が都市名の先頭と一致するもの、最初の1件）
     どちらも該当しなければ None を返す。
     """
-    # 1. 完全一致
     if normalized_input in city_list:
         return normalized_input
-    # 2. 前方一致（入力文字列で始まる都市名を探す）
     for city in city_list:
         if city.startswith(normalized_input):
             return city
     return None
+
+
+def find_distance_ceiling(actual_km: float, distance_tiers: list[float]) -> Optional[float]:
+    """実距離以上で最も近いタリフ距離設定(km)を返す。"""
+    candidates = [d for d in distance_tiers if d >= actual_km]
+    return min(candidates) if candidates else None
 
 
 # ============================================================
@@ -301,7 +394,7 @@ with st.sidebar:
 # ============================================================
 # データ取得
 # ============================================================
-city_list, weights, fare_table, distance_map = load_fare_data(
+city_list, weights, fare_table, distance_map, distance_fare_table = load_fare_data(
     spreadsheet_id=spreadsheet_id,
     sheet_name=sheet_name_cfg,
 )
@@ -323,7 +416,7 @@ with col_city:
     city_input = st.text_input(
         "🌏 行先（都市名）",
         placeholder="例: 上海、バンコク、ロサンゼルス",
-        help="都市名を正確に入力してください（全角・半角スペースは無視されます）。",
+        help="タリフに登録済みの都市名はそのまま検索します。未登録の場合は Google Maps で道路距離を自動計算して距離タリフを適用します。",
     )
 
 with col_weight:
@@ -348,72 +441,140 @@ if search_clicked:
     else:
         normalized_input = _normalize_city(city_input)
         matched_city = match_city(normalized_input, city_list)
+        matched_weight = find_weight_ceiling(weight_input, weights)
 
-        if matched_city is None:
-            st.error(f"「{city_input}」はタリフに存在しません。都市名を正確に入力してください。")
+        if matched_weight is None:
+            st.error(
+                f"重量 **{weight_input} kg** 以上の運賃データがありません。\n\n"
+                f"このタリフの最大重量: **{max(weights):g} kg**"
+            )
 
-        else:
-            # 前方一致で補完された場合は通知
+        elif matched_city is not None:
+            # ── ① タリフに都市名が存在するケース ──────────────────────────
             if matched_city != normalized_input:
                 st.caption(f"「{city_input}」を「{matched_city}」として検索しました。")
 
-            matched_weight = find_weight_ceiling(weight_input, weights)
+            fare = fare_table[matched_city].get(matched_weight)
 
-            if matched_weight is None:
+            if fare is None:
                 st.error(
-                    f"重量 **{weight_input} kg** 以上の運賃データがありません。\n\n"
-                    f"このタリフの最大重量: **{max(weights):g} kg**"
+                    f"「{matched_city}」× **{matched_weight:g} kg** の運賃データが見つかりません。\n\n"
+                    "OKTable のデータを確認してください。"
                 )
-
             else:
-                fare = fare_table[matched_city].get(matched_weight)
+                st.markdown("---")
+                st.subheader("📊 検索結果")
 
-                if fare is None:
-                    st.error(
-                        f"「{matched_city}」× **{matched_weight:g} kg** の運賃データが見つかりません。\n\n"
-                        "OKTable のデータを確認してください。"
-                    )
-                else:
-                    st.markdown("---")
-                    st.subheader("📊 検索結果")
-
-                    ref_col1, ref_col2, ref_col3 = st.columns(3)
-                    with ref_col1:
-                        st.markdown(
-                            f'<div class="ref-box">'
-                            f'<b>参照した都市名</b>'
-                            f'<span class="ref-value">{matched_city}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                    with ref_col2:
-                        weight_note = f"（入力: {weight_input:g} kg → 切り上げ）" \
-                                      if weight_input != matched_weight else ""
-                        st.markdown(
-                            f'<div class="ref-box">'
-                            f'<b>参照した重量 {weight_note}</b>'
-                            f'<span class="ref-value">{matched_weight:g} kg</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                    with ref_col3:
-                        distance_val = distance_map.get(matched_city, "—")
-                        st.markdown(
-                            f'<div class="ref-box">'
-                            f'<b>参照した距離</b>'
-                            f'<span class="ref-value">{distance_val}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
+                ref_col1, ref_col2, ref_col3 = st.columns(3)
+                with ref_col1:
                     st.markdown(
-                        f'<div class="fare-result-box">¥ {int(fare):,}</div>',
+                        f'<div class="ref-box"><b>参照した都市名</b>'
+                        f'<span class="ref-value">{matched_city}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with ref_col2:
+                    weight_note = f"（入力: {weight_input:g} kg → 切り上げ）" \
+                                  if weight_input != matched_weight else ""
+                    st.markdown(
+                        f'<div class="ref-box"><b>参照した重量 {weight_note}</b>'
+                        f'<span class="ref-value">{matched_weight:g} kg</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                with ref_col3:
+                    distance_val = distance_map.get(matched_city, "—")
+                    st.markdown(
+                        f'<div class="ref-box"><b>参照した距離</b>'
+                        f'<span class="ref-value">{distance_val}</span></div>',
                         unsafe_allow_html=True,
                     )
 
-                    st.metric(
-                        label=f"{normalized_input}  |  {matched_weight:g} kg  |  {selected_year_name}",
-                        value=f"¥{int(fare):,}",
+                st.markdown(
+                    f'<div class="fare-result-box">¥ {int(fare):,}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.metric(
+                    label=f"{matched_city}  |  {matched_weight:g} kg  |  {selected_year_name}",
+                    value=f"¥{int(fare):,}",
+                )
+
+        else:
+            # ── ② タリフに都市名なし → Google Maps で距離を自動計算 ────────
+            if not distance_fare_table:
+                st.error(
+                    f"「{city_input}」はタリフに存在せず、距離タリフ設定も OKTable にありません。\n\n"
+                    "OKTable に距離設定行（A列=距離km数値, B列=重量, C列=運賃）を追加してください。"
+                )
+            else:
+                with st.spinner(f"Google Maps で「{city_input}」までの道路距離を計算中..."):
+                    actual_km, err_msg = get_road_distance_km(city_input)
+
+                if actual_km is None:
+                    st.error(
+                        f"「{city_input}」はタリフに存在せず、距離も取得できませんでした。\n\n"
+                        f"エラー: {err_msg}"
                     )
+                else:
+                    distance_tiers = sorted(distance_fare_table.keys())
+                    applied_dist = find_distance_ceiling(actual_km, distance_tiers)
+
+                    if applied_dist is None:
+                        st.error(
+                            f"実走行距離 **{actual_km:.1f} km** に対応するタリフ距離設定がありません。\n\n"
+                            f"最大タリフ距離: **{max(distance_tiers):g} km**\n\n"
+                            "OKTable の距離設定行を追加してください。"
+                        )
+                    else:
+                        fare = distance_fare_table[applied_dist].get(matched_weight)
+
+                        if fare is None:
+                            st.error(
+                                f"距離 **{applied_dist:g} km** × **{matched_weight:g} kg** の運賃データが見つかりません。\n\n"
+                                "OKTable のデータを確認してください。"
+                            )
+                        else:
+                            st.markdown("---")
+                            st.subheader("📊 検索結果")
+                            st.info(
+                                f"「{city_input}」はタリフ未登録のため、Google Maps の実走行距離で距離タリフを適用しました。",
+                                icon="📍",
+                            )
+
+                            ref_col1, ref_col2, ref_col3, ref_col4 = st.columns(4)
+                            with ref_col1:
+                                st.markdown(
+                                    f'<div class="ref-box"><b>入力した行先</b>'
+                                    f'<span class="ref-value">{city_input}</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+                            with ref_col2:
+                                weight_note = f"（入力: {weight_input:g} kg → 切り上げ）" \
+                                              if weight_input != matched_weight else ""
+                                st.markdown(
+                                    f'<div class="ref-box"><b>参照した重量 {weight_note}</b>'
+                                    f'<span class="ref-value">{matched_weight:g} kg</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+                            with ref_col3:
+                                st.markdown(
+                                    f'<div class="ref-box">'
+                                    f'<b>実走行距離 <span class="maps-badge">Google Maps</span></b>'
+                                    f'<span class="ref-value">{actual_km:.1f} km</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+                            with ref_col4:
+                                st.markdown(
+                                    f'<div class="ref-box"><b>適用タリフ距離（切り上げ）</b>'
+                                    f'<span class="ref-value">{applied_dist:g} km</span></div>',
+                                    unsafe_allow_html=True,
+                                )
+
+                            st.markdown(
+                                f'<div class="fare-result-box">¥ {int(fare):,}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.metric(
+                                label=f"{city_input} ({actual_km:.1f}km → {applied_dist:g}km適用)  |  {matched_weight:g} kg  |  {selected_year_name}",
+                                value=f"¥{int(fare):,}",
+                            )
 
 st.caption(f"© 富士ミネラル向けタリフ | 参照タリフ: {selected_year_name}")

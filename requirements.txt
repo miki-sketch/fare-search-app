@@ -3,3 +3,4 @@ pandas
 pyyaml
 gspread
 google-auth
+requests
