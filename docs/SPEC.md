@@ -172,14 +172,48 @@ spreadsheets:
 
 > **注意**: 認証情報ファイルは `.gitignore` で除外済み。絶対にコミットしないこと。
 
-### デプロイ
+---
 
-`Procfile` があるため Railway / Heroku 系を想定。
-`.streamlit/config.toml` でポート `8080`、`headless = true` を指定。
+## 7. 起動方法
+
+### 本番環境（通常はこちら）
+
+**Railway にデプロイ済み。利用者はこのURLを開くだけ。**
+
+https://fare-search-app-production.up.railway.app/
+
+- `Procfile`（`web: streamlit run app.py`）で起動
+- 環境変数（`GOOGLE_CREDENTIALS` / `GOOGLE_MAPS_API_KEY`）は **Railway の Variables に設定済み**
+- `main` ブランチへの push で再デプロイされる想定
+
+### ローカル起動（改修時の動作確認用）
+
+```bash
+cd ~/fare-search-app
+
+# 初回のみ
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 毎回：認証情報をセット
+export GOOGLE_CREDENTIALS='{"type":"service_account", ... }'
+export GOOGLE_MAPS_API_KEY='AIza...'
+
+streamlit run app.py
+```
+
+→ ブラウザで **http://localhost:8080** を開く
+
+**注意点**
+- ポートは **8080**（Streamlit 標準の 8501 ではない）。`.streamlit/config.toml` で指定
+- `headless = true` のため、**ブラウザは自動で開かない**
+- `GOOGLE_CREDENTIALS` の代わりに、プロジェクト直下に `credentials.json` を置く方法も可（`.gitignore` 除外済み）
+- `protobuf==3.20.3` の固定があるため、`pip install` でバージョン衝突が起きる可能性あり
 
 ---
 
-## 7. 既知の課題
+## 8. 既知の課題
 
 改修時の検討材料。**修正は依頼があったものだけ行うこと。**
 
@@ -197,7 +231,7 @@ spreadsheets:
 
 ---
 
-## 8. 改修時の注意（AIエージェント向け）
+## 9. 改修時の注意（AIエージェント向け）
 
 - **3段階フォールバックの順序（都市名 → ログキャッシュ → Google Maps）を変更しないこと。** API課金を抑える設計意図がある
 - **重量・距離の「切り上げ」ルールを変更しないこと。** タリフの読み方としてこれが正。四捨五入や切り捨てにしてはいけない
